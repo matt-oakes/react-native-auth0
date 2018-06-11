@@ -1,12 +1,9 @@
-import Agent from './agent';
-import {
-  NativeModules,
-  Platform
-} from 'react-native';
+import Agent from "./agent";
+import { NativeModules, Platform } from "react-native";
 
-import url from 'url';
-import Auth0Error from '../auth/auth0Error';
-import AuthError from '../auth/authError';
+import url from "url";
+import Auth0Error from "../auth/auth0Error";
+import AuthError from "../auth/authError";
 
 const { A0Auth0 } = NativeModules;
 
@@ -21,14 +18,51 @@ const { A0Auth0 } = NativeModules;
  * @see https://auth0.com/docs/api-auth/grant/authorization-code-pkce
  */
 export default class WebAuth {
-
   constructor(auth) {
     this.client = auth;
     const { baseUrl, clientId, domain } = auth;
     this.domain = domain;
     this.clientId = clientId;
 
+    const bundleIdentifier = A0Auth0.bundleIdentifier;
+    this.redirectUri = `${bundleIdentifier.toLowerCase()}://${domain}/${
+      Platform.OS
+    }/${bundleIdentifier}/callback`;
+
     this.agent = new Agent();
+  }
+
+  /**
+   * Gets the URL which will be used to authorize with the given options.
+   *
+   * @param {Object} parameters parameters to send
+   * @param {String} [parameters.state] random string to prevent CSRF attacks and used to discard unexepcted results. By default its a cryptographically secure random.
+   * @param {String} [parameters.nonce] random string to prevent replay attacks of id_tokens.
+   * @param {String} [parameters.audience] identifier of Resource Server (RS) to be included as audience (aud claim) of the issued access token
+   * @param {String} [parameters.scope] scopes requested for the issued tokens. e.g. `openid profile`
+   * @returns {Promise}
+   * @see https://auth0.com/docs/api/authentication#authorize-client
+   *
+   * @memberof WebAuth
+   */
+  authorizeUrl(options = {}) {
+    const { clientId, domain, client, redirectUri, agent } = this;
+    return agent.newTransaction().then(({ state, verifier, ...defaults }) => {
+      const expectedState = options.state || state;
+      let query = {
+        ...options,
+        clientId,
+        responseType: "code",
+        redirectUri,
+        state: expectedState,
+        ...defaults
+      };
+      return {
+        url: this.client.authorizeUrl(query),
+        verifier,
+        expectedState
+      };
+    });
   }
 
   /**
@@ -47,62 +81,71 @@ export default class WebAuth {
    * @memberof WebAuth
    */
   authorize(options = {}) {
-    const { clientId, domain, client, agent } = this;
-    return agent
-      .newTransaction()
-      .then(({state, verifier, ...defaults}) => {
-        const bundleIdentifier = A0Auth0.bundleIdentifier;
-        const callbackScheme = bundleIdentifier.toLowerCase();
-        const redirectUri = `${callbackScheme}://${domain}/${Platform.OS}/${bundleIdentifier}/callback`
-        const expectedState = options.state || state;
-        let query = {
+    const { client, agent } = this;
+    return this.authorizeUrl(options).then(
+      ({ url, expectedState, verifier }) => {
+        return this.authorizeWithUrl(url, {
           ...options,
-          clientId,
-          responseType: 'code',
-          redirectUri,
           state: expectedState,
-          ...defaults,
-        };
-        const authorizeUrl = this.client.authorizeUrl(query);
-        const showOptions = {
-          url: authorizeUrl,
-          callbackScheme,
-          allowAuthenticationSession: options.allowAuthenticationSession,
-          closeOnLoad: false
-        };
-        return agent
-          .show(showOptions)
-          .then((redirectUrl) => {
-            if (!redirectUrl || !redirectUrl.startsWith(redirectUri)) {
-              throw new AuthError({
-                json: {
-                  error: 'a0.redirect_uri.not_expected',
-                  error_description: `Expected ${redirectUri} but got ${redirectUrl}`
-                },
-                status: 0
-              });
-            }
-            const query = url.parse(redirectUrl, true).query
-            const {
-              code,
-              state: resultState,
-              error
-            } = query;
-            if (error) {
-              throw new Auth0Error({json: query, status: 0});
-            }
-            if (resultState !== expectedState) {
-              throw new AuthError({
-                json: {
-                  error: 'a0.state.invalid',
-                  error_description: `Invalid state recieved in redirect url`
-                },
-                status: 0
-              });
-            }
-            return client.exchange({code, verifier, redirectUri})
-          });
+          verifier
+        });
+      }
+    );
+  }
+
+  /**
+   * Starts the AuthN/AuthZ transaction using the given URL.
+   *
+   * In iOS it will use `SFSafariViewController` or `SFAuthenticationSession` and in Android Chrome Custom Tabs.
+   *
+   * @param {Object} parameters parameters to send
+   * @param {String} [parameters.state] random string to prevent CSRF attacks and used to discard unexepcted results. By default its a cryptographically secure random.
+   * @param {String} [parameters.nonce] random string to prevent replay attacks of id_tokens.
+   * @param {String} [parameters.audience] identifier of Resource Server (RS) to be included as audience (aud claim) of the issued access token
+   * @param {String} [parameters.scope] scopes requested for the issued tokens. e.g. `openid profile`
+   * @returns {Promise}
+   * @see https://auth0.com/docs/api/authentication#authorize-client
+   *
+   * @memberof WebAuth
+   */
+  authorizeWithUrl(authorizeUrl, options = {}) {
+    const { client, agent } = this;
+    const showOptions = {
+      url: authorizeUrl,
+      callbackScheme: A0Auth0.bundleIdentifier.toLowerCase(),
+      allowAuthenticationSession: options.allowAuthenticationSession,
+      closeOnLoad: false
+    };
+    return agent.show(showOptions).then(redirectUrl => {
+      if (!redirectUrl || !redirectUrl.startsWith(this.redirectUri)) {
+        throw new AuthError({
+          json: {
+            error: "a0.redirect_uri.not_expected",
+            error_description: `Expected ${redirectUri} but got ${redirectUrl}`
+          },
+          status: 0
+        });
+      }
+      const query = url.parse(redirectUrl, true).query;
+      const { code, state: resultState, error } = query;
+      if (error) {
+        throw new Auth0Error({ json: query, status: 0 });
+      }
+      if (resultState !== options.state) {
+        throw new AuthError({
+          json: {
+            error: "a0.state.invalid",
+            error_description: `Invalid state recieved in redirect url`
+          },
+          status: 0
+        });
+      }
+      return client.exchange({
+        code,
+        verifier: options.verifier,
+        redirectUri: this.redirectUri
       });
+    });
   }
 
   /**
@@ -117,14 +160,18 @@ export default class WebAuth {
    * @memberof WebAuth
    */
   clearSession(options = {}) {
-    if (Platform.OS !== 'ios') {
-      return Promise.reject(new AuthError({
-        json: {
-          error: 'a0.platform.not_available',
-          error_description: `Cannot perform operation in platform ${Platform.OS}`
-        },
-        status: 0
-      }));
+    if (Platform.OS !== "ios") {
+      return Promise.reject(
+        new AuthError({
+          json: {
+            error: "a0.platform.not_available",
+            error_description: `Cannot perform operation in platform ${
+              Platform.OS
+            }`
+          },
+          status: 0
+        })
+      );
     }
     const { client, agent } = this;
     const federated = options.federated || false;

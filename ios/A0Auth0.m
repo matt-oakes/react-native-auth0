@@ -60,9 +60,16 @@ RCT_EXPORT_METHOD(hide) {
 }
 
 RCT_EXPORT_METHOD(showUrl:(NSString *)urlString closeOnLoad:(BOOL)closeOnLoad callback:(RCTResponseSenderBlock)callback) {
-    [self presentSafariWithURL:[NSURL URLWithString:urlString]];
-    self.closeOnLoad = closeOnLoad;
-    self.sessionCallback = callback;
+    NSURL *url = [NSURL URLWithString:urlString];
+    if ([url.scheme isEqualToString:@"http"] || [url.scheme isEqualToString:@"https"]) {
+        // Open HTTP and HTTPs URLs in a SafariViewController
+        [self presentSafariWithURL:[NSURL URLWithString:urlString]];
+        self.closeOnLoad = closeOnLoad;
+        self.sessionCallback = callback;
+    } else {
+        // Open every other URL scheme with whatever can handle it
+        [[UIApplication sharedApplication] openURL:url];
+    }
 }
 
 RCT_EXPORT_METHOD(oauthParameters:(RCTResponseSenderBlock)callback) {
